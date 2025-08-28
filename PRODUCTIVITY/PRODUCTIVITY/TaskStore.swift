@@ -62,8 +62,18 @@ final class TaskStore: ObservableObject {
                 title = title.replacingOccurrences(of: durToken, with: "").trimmingCharacters(in: .whitespaces)
             }
 
-            // weekday → due date (next occurrence)
-            if let (name, wk) = firstWeekday(in: title) {
+            // weekday → due date (supports "next <weekday>")
+            if let span = matchWeekdaySpan(in: title) {
+                if span.isNext {
+                    due = nextWeekday(span.weekday, from: .now)
+                } else {
+                    due = next(weekday: span.weekday, from: .now)
+                }
+                // remove matched phrase (e.g., "next wed" or "wednesday")
+                title.removeSubrange(span.rangeInOriginal(title))
+                title = title.replacingOccurrences(of: "  ", with: " ").trimmingCharacters(in: .whitespaces)
+            } else if let (name, wk) = firstWeekday(in: title) {
+                // fallback to old behavior
                 due = next(weekday: wk, from: .now)
                 title = title.replacingOccurrences(of: name, with: "", options: .caseInsensitive)
                     .trimmingCharacters(in: .whitespaces)
@@ -110,6 +120,68 @@ final class TaskStore: ObservableObject {
             try? data.write(to: keywordsURL, options: .atomic)
         }
     }
+}
+
+// MARK: - Natural language weekday helpers
+fileprivate struct WeekdaySpan {
+    let isNext: Bool
+    let weekday: Int   // 1=Sun … 7=Sat (Calendar)
+    let range: Range<String.Index>  // range in lowercased string
+    func rangeInOriginal(_ original: String) -> Range<String.Index> {
+        let lower = original.lowercased()
+        // Map lowercased range back to original by offset
+        let lowerStart = lower.distance(from: lower.startIndex, to: range.lowerBound)
+        let lowerEnd   = lower.distance(from: lower.startIndex, to: range.upperBound)
+        let start = original.index(original.startIndex, offsetBy: lowerStart)
+        let end   = original.index(original.startIndex, offsetBy: lowerEnd)
+        return start..<end
+    }
+}
+
+fileprivate func matchWeekdaySpan(in text: String) -> WeekdaySpan? {
+    let lower = text.lowercased()
+    // Pattern: optional "next " then weekday variants
+    // We'll scan manually for robustness
+    let tokens: [(String, Int)] = [
+        ("sunday",1),("sun",1),
+        ("monday",2),("mon",2),
+        ("tuesday",3),("tuesday",3),("tues",3),("tue",3),
+        ("wednesday",4),("weds",4),("wed",4),
+        ("thursday",5),("thurs",5),("thur",5),("thu",5),
+        ("friday",6),("fri",6),
+        ("saturday",7),("sat",7)
+    ]
+    // Search for "next <weekday>" first
+    if let nextRange = lower.range(of: "next ") {
+        let afterNext = nextRange.upperBound..<lower.endIndex
+        for (name, wk) in tokens {
+            if let r = lower.range(of: name, options: [.caseInsensitive], range: afterNext) {
+                // Ensure "next" is immediately before or separated by single space(s)
+                let span = nextRange.lowerBound..<r.upperBound
+                return WeekdaySpan(isNext: true, weekday: wk, range: span)
+            }
+        }
+    }
+    // Else, search for plain weekday
+    for (name, wk) in tokens {
+        if let r = lower.range(of: name, options: .caseInsensitive) {
+            return WeekdaySpan(isNext: false, weekday: wk, range: r)
+        }
+    }
+    return nil
+}
+
+/// next week's weekday (at least 7 days ahead)
+fileprivate func nextWeekday(_ weekday: Int, from date: Date) -> Date {
+    var comps = DateComponents()
+    comps.weekday = weekday
+    let cal = Calendar.current
+    let upcoming = cal.nextDate(after: date, matching: comps, matchingPolicy: .nextTimePreservingSmallerComponents)!
+    let plus7 = cal.date(byAdding: .day, value: 7, to: date)!
+    if upcoming <= plus7 {
+        return cal.date(byAdding: .day, value: 7, to: upcoming)!
+    }
+    return upcoming
 }
 
 // Helpers
