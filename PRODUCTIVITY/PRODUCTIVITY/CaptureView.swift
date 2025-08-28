@@ -10,8 +10,13 @@ struct CaptureView: View {
                 .textEditorStyle(.plain)
                 .scrollContentBackground(.hidden)
                 .padding()
-                .navigationTitle("Notes")
+                .navigationTitle("")
+                .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
+                    ToolbarItem(placement: .principal) {
+                        Text("Notes")
+                            .font(.title).bold()
+                    }
                     ToolbarItem(placement: .navigationBarTrailing) {
                         Button("Send to Lists") {
                             store.importFromText(draft)
