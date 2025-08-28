@@ -18,12 +18,8 @@ struct ListsView: View {
                 ForEach(groupedSections) { section in
                     SectionGroupView(
                         section: section,
-                        onToggle: { id in
-                            withAnimation { store.toggle(id) }
-                        },
-                        onDelete: { offsets in
-                            deleteFromStore(offsets, in: section.items)
-                        }
+                        onToggle: { id in withAnimation { store.toggle(id) } },
+                        onDelete: { offsets in deleteFromStore(offsets, in: section.items) }
                     )
                 }
             }
@@ -38,6 +34,7 @@ struct ListsView: View {
                     .pickerStyle(.segmented)
                     .frame(width: 220)
                 }
+                // Filter + keyword settings
                 ToolbarItem(placement: .navigationBarLeading) {
                     Menu {
                         Picker("Filter", selection: $filter) {
@@ -51,6 +48,7 @@ struct ListsView: View {
                         Label(filter.rawValue, systemImage: "line.3.horizontal.decrease.circle")
                     }
                 }
+                // Add new task
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button { showingNew = true } label: {
                         Image(systemName: "plus.circle.fill")
@@ -66,6 +64,7 @@ struct ListsView: View {
         }
     }
 
+    // MARK: filtering
     private var filteredItems: [TaskItem] {
         let tasks = store.tasks
         let base: [TaskItem]
@@ -83,22 +82,17 @@ struct ListsView: View {
         case .unplanned:
             base = tasks.filter { $0.scheduledStart == nil }
         case .completed:
-            base = tasks // will be narrowed by listMode below
+            base = tasks
         }
-        // Apply listMode (Active vs Completed)
-        if listMode == 1 {
-            return base.filter { $0.isCompleted }
-        } else {
-            return base.filter { !$0.isCompleted }
-        }
+        return listMode == 1 ? base.filter { $0.isCompleted } : base.filter { !$0.isCompleted }
     }
 
+    // MARK: grouping into sections (by first tag/category)
     private var groupedSections: [TaskSection] {
         let groups = Dictionary(grouping: filteredItems) { (item: TaskItem) in
             item.tags.first ?? "Other"
         }
-        let sortedKeys = groups.keys.sorted()
-        return sortedKeys.map { key in
+        return groups.keys.sorted().map { key in
             let items = (groups[key] ?? []).sorted {
                 let lhs = $0.scheduledStart ?? $0.dueDate ?? $0.createdAt
                 let rhs = $1.scheduledStart ?? $1.dueDate ?? $1.createdAt
@@ -110,13 +104,12 @@ struct ListsView: View {
 
     private func deleteFromStore(_ offsets: IndexSet, in sectionItems: [TaskItem]) {
         let ids = offsets.map { sectionItems[$0].id }
-        let globalIndices = store.tasks.enumerated().compactMap { (idx, t) in
-            ids.contains(t.id) ? idx : nil
-        }
-        store.delete(at: IndexSet(globalIndices))
+        let global = store.tasks.enumerated().compactMap { (idx, t) in ids.contains(t.id) ? idx : nil }
+        store.delete(at: IndexSet(global))
     }
 }
 
+// Section wrapper (keeps compiler happy & isolates NavigationLink hit areas)
 private struct SectionGroupView: View {
     let section: TaskSection
     let onToggle: (UUID) -> Void
@@ -126,15 +119,16 @@ private struct SectionGroupView: View {
         Section(header: Text(section.id).font(.title3).bold()) {
             ForEach(section.items) { item in
                 HStack(alignment: .top, spacing: 12) {
-                    // Small fixed hit-area circle button
+                    // Small isolated toggle button
                     Button(action: { onToggle(item.id) }) {
                         Image(systemName: item.isCompleted ? "checkmark.circle.fill" : "circle")
                             .foregroundStyle(item.isCompleted ? .green : .secondary)
-                            .frame(width: 28, height: 28, alignment: .center)
+                            .frame(width: 28, height: 28)
                             .contentShape(Circle())
                     }
-                    .buttonStyle(.plain) // prevent row-wide highlight
-                    // Dedicated link area (no overlay on the button)
+                    .buttonStyle(.plain)
+
+                    // Tapping the row navigates only
                     NavigationLink {
                         TaskDetailView(task: item)
                     } label: {
@@ -150,14 +144,11 @@ private struct SectionGroupView: View {
                                     Label {
                                         Text(due, format: .dateTime.month().day().hour().minute())
                                             .font(.caption)
-                                    } icon: {
-                                        Image(systemName: "calendar")
-                                    }
+                                    } icon: { Image(systemName: "calendar") }
                                     .labelStyle(.titleAndIcon)
                                 }
                                 if let d = item.durationMinutes {
-                                    Label("\(d)m", systemImage: "timer")
-                                        .font(.caption)
+                                    Label("\(d)m", systemImage: "timer").font(.caption)
                                 }
                             }
                         }
@@ -166,9 +157,7 @@ private struct SectionGroupView: View {
                 }
                 // Swipe right to complete/uncomplete
                 .swipeActions(edge: .leading, allowsFullSwipe: true) {
-                    Button {
-                        onToggle(item.id)
-                    } label: {
+                    Button { onToggle(item.id) } label: {
                         Label(item.isCompleted ? "Uncomplete" : "Complete",
                               systemImage: item.isCompleted ? "arrow.uturn.backward" : "checkmark.circle")
                     }
@@ -180,48 +169,7 @@ private struct SectionGroupView: View {
     }
 }
 
-private struct TaskRow: View {
-    let item: TaskItem
-    var onToggle: () -> Void
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            Button(action: onToggle) {
-                Image(systemName: item.isCompleted ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(item.isCompleted ? .green : .secondary)
-            }
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text(item.title)
-                    .font(.body.weight(.medium))
-                    .strikethrough(item.isCompleted, color: .secondary)
-
-                if !item.note.isEmpty {
-                    Text(item.note).font(.subheadline).foregroundStyle(.secondary)
-                }
-
-                HStack(spacing: 8) {
-                    if let due = item.dueDate {
-                        Label {
-                            Text(due, format: .dateTime.month().day().hour().minute())
-                                .font(.caption)
-                        } icon: {
-                            Image(systemName: "calendar")
-                        }
-                        .labelStyle(.titleAndIcon)
-                    }
-                    if let d = item.durationMinutes {
-                        Label("\(d)m", systemImage: "timer")
-                            .font(.caption)
-                    }
-                }
-            }
-        }
-    }
-}
-
-// NewTaskSheet, TaskDetailView, KeywordSettingsSheet remain unchanged from your file.
-
+// MARK: New Task sheet
 private struct NewTaskSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var title = ""
@@ -237,19 +185,13 @@ private struct NewTaskSheet: View {
             Form {
                 TextField("Title", text: $title)
                 TextField("Note", text: $note)
-
-                Toggle("Due date", isOn: Binding(
-                    get: { due != nil },
-                    set: { due = $0 ? .now : nil }
-                ))
+                Toggle("Due date", isOn: Binding(get: { due != nil }, set: { due = $0 ? .now : nil }))
                 if let binding = Binding($due) {
                     DatePicker("Due", selection: binding, displayedComponents: [.date, .hourAndMinute])
                 }
-
                 Stepper(value: $duration, in: 0...600, step: 5) {
                     Text("Duration: \(duration)m (0 = unscheduled)")
                 }
-
                 TextField("Tags (comma separated)", text: $tags)
             }
             .navigationTitle("New Task")
@@ -273,9 +215,18 @@ private struct NewTaskSheet: View {
     }
 }
 
+// MARK: Task details (autosave)
 private struct TaskDetailView: View {
     @EnvironmentObject private var store: TaskStore
     @State var task: TaskItem
+
+    @State private var saveWorkItem: DispatchWorkItem?
+    private func scheduleAutoSave() {
+        saveWorkItem?.cancel()
+        let wi = DispatchWorkItem { store.update(task) }
+        saveWorkItem = wi
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: wi)
+    }
 
     var body: some View {
         Form {
@@ -287,36 +238,23 @@ private struct TaskDetailView: View {
             Section("Dates") {
                 DatePicker("Due", selection: Binding(get: {
                     task.dueDate ?? .now
-                }, set: { new in
-                    task.dueDate = new
-                }), displayedComponents: [.date, .hourAndMinute])
-                .opacity(task.dueDate == nil ? 0.3 : 1)
-                .overlay(
-                    Toggle("", isOn: Binding(get: { task.dueDate != nil }, set: { on in
-                        task.dueDate = on ? .now : nil
-                    })).labelsHidden()
-                    , alignment: .trailing
-                )
-
-                Stepper(value: Binding(get: { task.durationMinutes ?? 0 }, set: { task.durationMinutes = $0 == 0 ? nil : $0 }),
-                        in: 0...600, step: 5) {
-                    Text("Duration: \(task.durationMinutes ?? 0)m")
-                }
+                }, set: { task.dueDate = $0 }), displayedComponents: [.date, .hourAndMinute])
             }
         }
-        .navigationTitle("Task")
-        .toolbar {
-            ToolbarItem(placement: .confirmationAction) {
-                Button("Save") { store.update(task) }
-            }
-        }
+        // Auto-save triggers
+        .onChange(of: task.title) { _ in scheduleAutoSave() }
+        .onChange(of: task.note) { _ in scheduleAutoSave() }
+        .onChange(of: task.isCompleted) { _ in scheduleAutoSave() }
+        .onChange(of: task.dueDate) { _ in scheduleAutoSave() }
+        .onChange(of: task.durationMinutes) { _ in scheduleAutoSave() }
+        .onDisappear { store.update(task) }
     }
 }
 
+// MARK: Keyword settings
 private struct KeywordSettingsSheet: View {
     @EnvironmentObject var store: TaskStore
     @Environment(\.dismiss) private var dismiss
-
     @State private var key: String = ""
     @State private var category: String = ""
 

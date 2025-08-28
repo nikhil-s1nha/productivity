@@ -1,10 +1,10 @@
-// TaskStore.swift
 import Foundation
 import Combine
 
+// MARK: - Task Store (data only)
 final class TaskStore: ObservableObject {
     @Published private(set) var tasks: [TaskItem] = []
-    @Published var keywordMap: [String: String] = [:]   // e.g., "noori" -> "History"
+    @Published var keywordMap: [String: String] = [:]   // e.g., "noori" -> "AP GOV"
 
     private let saveURL: URL
     private let keywordsURL: URL
@@ -17,32 +17,46 @@ final class TaskStore: ObservableObject {
         loadKeywords()
     }
 
-    // MARK: - CRUD (unchanged)
+    // MARK: - CRUD
     func add(_ task: TaskItem) {
         tasks.insert(task, at: 0)
         save()
     }
-    func toggle(_ id: UUID) { guard let i = tasks.firstIndex(where: { $0.id == id }) else { return }
-        tasks[i].isCompleted.toggle(); save()
-    }
-    func update(_ task: TaskItem) { guard let i = tasks.firstIndex(where: { $0.id == task.id }) else { return }
-        tasks[i] = task; save()
-    }
-    func delete(at offsets: IndexSet) { tasks.remove(atOffsets: offsets); save() }
 
-    // MARK: - Filters (leave your version)
+    func toggle(_ id: UUID) {
+        guard let i = tasks.firstIndex(where: { $0.id == id }) else { return }
+        tasks[i].isCompleted.toggle()
+        save()
+    }
 
-    // MARK: - Keyword map
+    func update(_ task: TaskItem) {
+        guard let i = tasks.firstIndex(where: { $0.id == task.id }) else { return }
+        tasks[i] = task
+        save()
+    }
+
+    func delete(at offsets: IndexSet) {
+        tasks.remove(atOffsets: offsets)
+        save()
+    }
+
+    // MARK: - Keyword rules
     func setMapping(key: String, category: String) {
         keywordMap[key.lowercased()] = category
         saveKeywords()
     }
+
     func removeMapping(key: String) {
         keywordMap.removeValue(forKey: key.lowercased())
         saveKeywords()
     }
 
     // MARK: - Notes-style import with rules
+    /// Each non-empty line becomes a task. Supports:
+    /// - #tags
+    /// - durations like [25m], [1h]
+    /// - weekday phrases incl. "next <weekday>"
+    /// - keywordMap tokens (e.g., "noori" -> "AP GOV"), removed from title and added as first tag
     func importFromText(_ text: String) {
         let lines = text
             .split(whereSeparator: \.isNewline)
@@ -55,45 +69,58 @@ final class TaskStore: ObservableObject {
             var due: Date? = nil
             var duration: Int? = nil
 
-            // inline durations like [25m] [1h] (keep your existing logic if you have it)
+            // inline #tags
+            let tagHits = matches(for: #"(?<=#)[A-Za-z0-9_\-]+"#, in: title)
+            if !tagHits.isEmpty {
+                tags.append(contentsOf: tagHits)
+                for t in tagHits {
+                    title = title.replacingOccurrences(of: "#\(t)", with: "").trimmingCharacters(in: .whitespaces)
+                }
+            }
+
+            // inline durations like [25m] / [1h]
             if let durToken = matches(for: #"\[(\d+)(m|h)\]"#, in: title).first,
                let amt = Int(durToken.replacingOccurrences(of: #"\D"#, with: "", options: .regularExpression)) {
-                duration = durToken.contains("h") ? amt * 60 : amt
+                duration = durToken.contains("h") ? (amt * 60) : amt
                 title = title.replacingOccurrences(of: durToken, with: "").trimmingCharacters(in: .whitespaces)
             }
 
-            // weekday → due date (supports "next <weekday>")
+            // "next <weekday>" or plain weekday → due date
             if let span = matchWeekdaySpan(in: title) {
-                if span.isNext {
-                    due = nextWeekday(span.weekday, from: .now)
-                } else {
-                    due = next(weekday: span.weekday, from: .now)
-                }
-                // remove matched phrase (e.g., "next wed" or "wednesday")
+                due = span.isNext ? nextWeekday(span.weekday, from: .now) : next(weekday: span.weekday, from: .now)
                 title.removeSubrange(span.rangeInOriginal(title))
                 title = title.replacingOccurrences(of: "  ", with: " ").trimmingCharacters(in: .whitespaces)
             } else if let (name, wk) = firstWeekday(in: title) {
-                // fallback to old behavior
                 due = next(weekday: wk, from: .now)
                 title = title.replacingOccurrences(of: name, with: "", options: .caseInsensitive)
                     .trimmingCharacters(in: .whitespaces)
             }
 
-            // teacher/club → category tag, remove token
+            // keywordMap: token -> category tag (remove token from title)
             var words: [String] = []
             for w in title.split(separator: " ") {
                 let lw = w.lowercased()
                 if let cat = keywordMap[lw] {
-                    if !tags.contains(cat) { tags.append(cat) }
+                    if !tags.contains(cat) { tags.insert(cat, at: 0) } // first tag for section grouping
                 } else {
                     words.append(String(w))
                 }
             }
             title = words.joined(separator: " ")
 
-            add(TaskItem(title: title, note: "", createdAt: .now,
-                         dueDate: due, scheduledStart: nil, durationMinutes: duration,
-                         isCompleted: false, tags: tags))
+            // build and save
+            let item = TaskItem(
+                id: UUID(),
+                title: title,
+                note: "",
+                createdAt: .now,
+                dueDate: due,
+                scheduledStart: nil,
+                durationMinutes: duration,
+                isCompleted: false,
+                tags: tags
+            )
+            add(item)
         }
     }
 
@@ -104,17 +131,20 @@ final class TaskStore: ObservableObject {
             tasks = decoded
         }
     }
+
     private func save() {
         if let data = try? JSONEncoder().encode(tasks) {
             try? data.write(to: saveURL, options: .atomic)
         }
     }
+
     private func loadKeywords() {
         guard let data = try? Data(contentsOf: keywordsURL) else { return }
         if let decoded = try? JSONDecoder().decode([String:String].self, from: data) {
             keywordMap = decoded
         }
     }
+
     private func saveKeywords() {
         if let data = try? JSONEncoder().encode(keywordMap) {
             try? data.write(to: keywordsURL, options: .atomic)
@@ -122,53 +152,70 @@ final class TaskStore: ObservableObject {
     }
 }
 
-// MARK: - Natural language weekday helpers
+// MARK: - Weekday parsing helpers
+
 fileprivate struct WeekdaySpan {
     let isNext: Bool
     let weekday: Int   // 1=Sun … 7=Sat (Calendar)
     let range: Range<String.Index>  // range in lowercased string
     func rangeInOriginal(_ original: String) -> Range<String.Index> {
         let lower = original.lowercased()
-        // Map lowercased range back to original by offset
-        let lowerStart = lower.distance(from: lower.startIndex, to: range.lowerBound)
-        let lowerEnd   = lower.distance(from: lower.startIndex, to: range.upperBound)
-        let start = original.index(original.startIndex, offsetBy: lowerStart)
-        let end   = original.index(original.startIndex, offsetBy: lowerEnd)
+        let startOff = lower.distance(from: lower.startIndex, to: range.lowerBound)
+        let endOff   = lower.distance(from: lower.startIndex, to: range.upperBound)
+        let start = original.index(original.startIndex, offsetBy: startOff)
+        let end   = original.index(original.startIndex, offsetBy: endOff)
         return start..<end
     }
 }
 
 fileprivate func matchWeekdaySpan(in text: String) -> WeekdaySpan? {
     let lower = text.lowercased()
-    // Pattern: optional "next " then weekday variants
-    // We'll scan manually for robustness
     let tokens: [(String, Int)] = [
         ("sunday",1),("sun",1),
         ("monday",2),("mon",2),
-        ("tuesday",3),("tuesday",3),("tues",3),("tue",3),
+        ("tuesday",3),("tues",3),("tue",3),
         ("wednesday",4),("weds",4),("wed",4),
         ("thursday",5),("thurs",5),("thur",5),("thu",5),
         ("friday",6),("fri",6),
         ("saturday",7),("sat",7)
     ]
-    // Search for "next <weekday>" first
     if let nextRange = lower.range(of: "next ") {
         let afterNext = nextRange.upperBound..<lower.endIndex
         for (name, wk) in tokens {
             if let r = lower.range(of: name, options: [.caseInsensitive], range: afterNext) {
-                // Ensure "next" is immediately before or separated by single space(s)
                 let span = nextRange.lowerBound..<r.upperBound
                 return WeekdaySpan(isNext: true, weekday: wk, range: span)
             }
         }
     }
-    // Else, search for plain weekday
     for (name, wk) in tokens {
         if let r = lower.range(of: name, options: .caseInsensitive) {
             return WeekdaySpan(isNext: false, weekday: wk, range: r)
         }
     }
     return nil
+}
+
+fileprivate func firstWeekday(in text: String) -> (String, Int)? {
+    let map: [(String, Int)] = [
+        ("sunday",1),("sun",1),
+        ("monday",2),("mon",2),
+        ("tuesday",3),("tues",3),("tue",3),
+        ("wednesday",4),("weds",4),("wed",4),
+        ("thursday",5),("thurs",5),("thur",5),("thu",5),
+        ("friday",6),("fri",6),
+        ("saturday",7),("sat",7)
+    ]
+    let lower = text.lowercased()
+    for (name, num) in map where lower.contains(name) { return (name, num) }
+    return nil
+}
+
+fileprivate func next(weekday: Int, from date: Date) -> Date {
+    var comps = DateComponents()
+    comps.weekday = weekday
+    return Calendar.current.nextDate(after: date, matching: comps,
+                                     matchingPolicy: .nextTimePreservingSmallerComponents)!
 }
 
 /// next week's weekday (at least 7 days ahead)
@@ -184,31 +231,9 @@ fileprivate func nextWeekday(_ weekday: Int, from date: Date) -> Date {
     return upcoming
 }
 
-// Helpers
+// MARK: - Regex helper
 fileprivate func matches(for regex: String, in text: String) -> [String] {
     (try? NSRegularExpression(pattern: regex))?
         .matches(in: text, range: NSRange(text.startIndex..., in: text))
         .compactMap { Range($0.range, in: text).map { String(text[$0]) } } ?? []
-}
-
-fileprivate func firstWeekday(in text: String) -> (String, Int)? {
-    // 1=Sun ... 7=Sat (Calendar.current)
-    let map: [(String, Int)] = [
-        ("sunday",1),("sun",1),
-        ("monday",2),("mon",2),
-        ("tuesday",3),("tue",3),("tues",3),
-        ("wednesday",4),("wed",4),
-        ("thursday",5),("thu",5),("thur",5),("thurs",5),
-        ("friday",6),("fri",6),
-        ("saturday",7),("sat",7)
-    ]
-    let lower = text.lowercased()
-    for (name, num) in map where lower.contains(name) { return (name, num) }
-    return nil
-}
-fileprivate func next(weekday: Int, from date: Date) -> Date {
-    var comps = DateComponents()
-    comps.weekday = weekday
-    return Calendar.current.nextDate(after: date, matching: comps,
-                                     matchingPolicy: .nextTimePreservingSmallerComponents)!
 }
