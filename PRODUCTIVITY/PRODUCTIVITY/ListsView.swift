@@ -7,89 +7,179 @@ private struct TaskSection: Identifiable {
 
 struct ListsView: View {
     @EnvironmentObject var store: TaskStore
-    @State private var filter: TaskFilter = .all
     @State private var showingNew = false
     @State private var showingSettings = false
-    @State private var listMode: Int = 0 // 0 = Active, 1 = Completed
+    @State private var collapsedSections: Set<String> = []
+
+    private enum DashboardSection { case today, upcoming, all, completed }
+    @State private var selectedSection: DashboardSection? = nil
 
     var body: some View {
         NavigationStack {
-            List {
-                ForEach(groupedSections) { section in
-                    SectionGroupView(
-                        section: section,
-                        onToggle: { id in withAnimation { store.toggle(id) } },
-                        onDelete: { offsets in deleteFromStore(offsets, in: section.items) }
-                    )
-                }
+            if let section = selectedSection {
+                taskList(for: section)
+            } else {
+                dashboard
             }
-            .navigationTitle("Lists")
-            .toolbar {
-                // Center segmented control for Active / Completed
-                ToolbarItem(placement: .principal) {
-                    Picker("", selection: $listMode) {
-                        Text("Active").tag(0)
-                        Text("Completed").tag(1)
-                    }
-                    .pickerStyle(.segmented)
-                    .frame(width: 220)
+        }
+    }
+
+    private var dashboard: some View {
+        VStack(spacing: 16) {
+            HStack(spacing: 16) {
+                dashboardBox(title: "Today", count: filteredItems(for: .today).count, color: .blue) { selectedSection = .today }
+                dashboardBox(title: "Upcoming", count: filteredItems(for: .upcoming).count, color: .orange) { selectedSection = .upcoming }
+            }
+            HStack(spacing: 16) {
+                dashboardBox(title: "All", count: store.tasks.count, color: .gray) { selectedSection = .all }
+                dashboardBox(title: "Completed", count: filteredItems(for: .completed).count, color: .green) { selectedSection = .completed }
+            }
+            Spacer()
+        }
+        .padding()
+        .navigationTitle("Lists")
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button { showingNew = true } label: { Image(systemName: "plus.circle.fill") }
+            }
+            ToolbarItem(placement: .navigationBarLeading) {
+                Button { showingSettings = true } label: { Image(systemName: "gearshape") }
+            }
+        }
+        .sheet(isPresented: $showingNew) { NewTaskSheet { store.add($0) } }
+        .sheet(isPresented: $showingSettings) { KeywordSettingsSheet().environmentObject(store) }
+    }
+
+    private func dashboardBox(title: String, count: Int, color: Color, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            ZStack(alignment: .topTrailing) {
+                RoundedRectangle(cornerRadius: 14).fill(color)
+                Text("\(count)")
+                    .font(.title3).bold().foregroundColor(.white)
+                    .padding(12)
+            }
+            .overlay(
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(title).font(.headline).foregroundColor(.white)
                 }
-                // Filter + keyword settings
-                ToolbarItem(placement: .navigationBarLeading) {
-                    Menu {
-                        Picker("Filter", selection: $filter) {
-                            ForEach(TaskFilter.allCases) { f in
-                                Text(f.rawValue).tag(f)
+                .padding(), alignment: .bottomLeading
+            )
+            .frame(maxWidth: .infinity, minHeight: 110)
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private func taskList(for section: DashboardSection) -> some View {
+        List {
+            ForEach(groupedSections(for: section)) { sec in
+                let isCollapsed = collapsedSections.contains(sec.id)
+                Section {
+                    if !isCollapsed {
+                        ForEach(sec.items) { item in
+                            HStack(alignment: .top, spacing: 12) {
+                                Button(action: { withAnimation { store.toggle(item.id) } }) {
+                                    Image(systemName: item.isCompleted ? "checkmark.circle.fill" : "circle")
+                                        .foregroundStyle(item.isCompleted ? .green : .secondary)
+                                        .frame(width: 28, height: 28)
+                                        .contentShape(Circle())
+                                }
+                                .buttonStyle(.plain)
+                                NavigationLink {
+                                    TaskDetailView(task: item)
+                                } label: {
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text(item.title)
+                                            .font(.body.weight(.medium))
+                                            .strikethrough(item.isCompleted, color: .secondary)
+                                        if !item.note.isEmpty {
+                                            Text(item.note).font(.subheadline).foregroundStyle(.secondary)
+                                        }
+                                        HStack(spacing: 8) {
+                                            if let due = item.dueDate {
+                                                let comps = Calendar.current.dateComponents([.hour, .minute, .second], from: due)
+                                                let isMidnight = (comps.hour == 0 && comps.minute == 0 && comps.second == 0)
+                                                Label {
+                                                    Text(isMidnight ? due.formatted(.dateTime.month().day())
+                                                                    : due.formatted(.dateTime.month().day().hour().minute()))
+                                                        .font(.caption)
+                                                } icon: { Image(systemName: "calendar") }
+                                                .labelStyle(.titleAndIcon)
+                                            }
+                                            if let d = item.durationMinutes {
+                                                Label("\(d)m", systemImage: "timer").font(.caption)
+                                            }
+                                        }
+                                    }
+                                    .contentShape(Rectangle())
+                                }
+                            }
+                            .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                                Button {
+                                    withAnimation { store.toggle(item.id) }
+                                } label: {
+                                    Label(item.isCompleted ? "Uncomplete" : "Complete",
+                                          systemImage: item.isCompleted ? "arrow.uturn.backward" : "checkmark.circle")
+                                }
+                                .tint(item.isCompleted ? .gray : .green)
                             }
                         }
-                        Divider()
-                        Button("Keyword Settings…") { showingSettings = true }
-                    } label: {
-                        Label(filter.rawValue, systemImage: "line.3.horizontal.decrease.circle")
+                        .onDelete { offsets in
+                            deleteFromStore(offsets, in: sec.items)
+                        }
+                    }
+                } header: {
+                    HStack {
+                        Text(sec.id).font(.title3).bold()
+                        Spacer()
+                        Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
+                            .foregroundStyle(.secondary)
+                    }
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        if isCollapsed { collapsedSections.remove(sec.id) } else { collapsedSections.insert(sec.id) }
                     }
                 }
-                // Add new task
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button { showingNew = true } label: {
-                        Image(systemName: "plus.circle.fill")
-                    }
-                }
-            }
-            .sheet(isPresented: $showingNew) {
-                NewTaskSheet { store.add($0) }
-            }
-            .sheet(isPresented: $showingSettings) {
-                KeywordSettingsSheet().environmentObject(store)
             }
         }
+        .navigationTitle(title(for: section))
+        .toolbar {
+            ToolbarItem(placement: .navigationBarLeading) {
+                Button("Back") { selectedSection = nil }
+            }
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button { showingNew = true } label: { Image(systemName: "plus.circle.fill") }
+            }
+        }
+        .sheet(isPresented: $showingNew) { NewTaskSheet { store.add($0) } }
     }
 
-    // MARK: filtering
-    private var filteredItems: [TaskItem] {
-        let tasks = store.tasks
-        let base: [TaskItem]
-        switch filter {
-        case .all:
-            base = tasks.sorted { $0.createdAt > $1.createdAt }
+    private func title(for section: DashboardSection) -> String {
+        switch section { case .today: return "Today"; case .upcoming: return "Upcoming"; case .all: return "All"; case .completed: return "Completed" }
+    }
+
+    private func filteredItems(for section: DashboardSection) -> [TaskItem] {
+        let cal = Calendar.current
+        let now = Date()
+        switch section {
         case .today:
-            base = tasks.filter { item in
-                let date = item.scheduledStart ?? item.dueDate
-                return date.map(Calendar.current.isDateInToday) ?? false
-            }.sorted { ($0.scheduledStart ?? $0.dueDate ?? .distantFuture) < ($1.scheduledStart ?? $1.dueDate ?? .distantFuture) }
+            return store.tasks.filter { ($0.scheduledStart ?? $0.dueDate).map(cal.isDateInToday) ?? false }
         case .upcoming:
-            base = tasks.filter { (($0.dueDate ?? $0.scheduledStart) ?? .distantFuture) > .now }
-                .sorted { ($0.dueDate ?? $0.scheduledStart ?? .distantFuture) < ($1.dueDate ?? $1.scheduledStart ?? .distantFuture) }
-        case .unplanned:
-            base = tasks.filter { $0.scheduledStart == nil }
+            let end = cal.date(byAdding: .day, value: 3, to: now)!
+            return store.tasks.filter {
+                guard let d = ($0.scheduledStart ?? $0.dueDate) else { return false }
+                return d > now && d < end && !$0.isCompleted
+            }
+        case .all:
+            return store.tasks
         case .completed:
-            base = tasks
+            let start = cal.date(byAdding: .day, value: -7, to: now)!
+            return store.tasks.filter { $0.isCompleted && (($0.scheduledStart ?? $0.dueDate) ?? .distantPast) > start }
         }
-        return listMode == 1 ? base.filter { $0.isCompleted } : base.filter { !$0.isCompleted }
     }
 
-    // MARK: grouping into sections (by first tag/category)
-    private var groupedSections: [TaskSection] {
-        let groups = Dictionary(grouping: filteredItems) { (item: TaskItem) in
+    private func groupedSections(for section: DashboardSection) -> [TaskSection] {
+        let groups = Dictionary(grouping: filteredItems(for: section)) { (item: TaskItem) in
             item.tags.first ?? "Other"
         }
         return groups.keys.sorted().map { key in
