@@ -85,13 +85,37 @@ final class TaskStore: ObservableObject {
                 title = title.replacingOccurrences(of: durToken, with: "").trimmingCharacters(in: .whitespaces)
             }
 
+            // relative day tokens → due date (minimal: tomorrow / yesterday)
+            do {
+                let lower = title.lowercased()
+                if lower.contains("tomorrow") || lower.contains("tmr") || lower.contains("tmrw") {
+                    if let date = Calendar.current.date(byAdding: .day, value: 1, to: .now) {
+                        due = startOfDay(date)
+                    }
+                    // strip token(s) from title
+                    ["tomorrow","tmr","tmrw"].forEach { tok in
+                        title = title.replacingOccurrences(of: tok, with: "", options: .caseInsensitive)
+                    }
+                    title = title.replacingOccurrences(of: "  ", with: " ").trimmingCharacters(in: .whitespaces)
+                } else if lower.contains("yesterday") {
+                    if let date = Calendar.current.date(byAdding: .day, value: -1, to: .now) {
+                        due = startOfDay(date)
+                    }
+                    title = title.replacingOccurrences(of: "yesterday", with: "", options: .caseInsensitive)
+                        .replacingOccurrences(of: "  ", with: " ")
+                        .trimmingCharacters(in: .whitespaces)
+                }
+            }
+
             // "next <weekday>" or plain weekday → due date
             if let span = matchWeekdaySpan(in: title) {
                 due = span.isNext ? nextWeekday(span.weekday, from: .now) : next(weekday: span.weekday, from: .now)
+                if let d = due { due = startOfDay(d) }
                 title.removeSubrange(span.rangeInOriginal(title))
                 title = title.replacingOccurrences(of: "  ", with: " ").trimmingCharacters(in: .whitespaces)
             } else if let (name, wk) = firstWeekday(in: title) {
                 due = next(weekday: wk, from: .now)
+                if let d = due { due = startOfDay(d) }
                 title = title.replacingOccurrences(of: name, with: "", options: .caseInsensitive)
                     .trimmingCharacters(in: .whitespaces)
             }
@@ -214,8 +238,9 @@ fileprivate func firstWeekday(in text: String) -> (String, Int)? {
 fileprivate func next(weekday: Int, from date: Date) -> Date {
     var comps = DateComponents()
     comps.weekday = weekday
-    return Calendar.current.nextDate(after: date, matching: comps,
-                                     matchingPolicy: .nextTimePreservingSmallerComponents)!
+    let dt = Calendar.current.nextDate(after: date, matching: comps,
+                                       matchingPolicy: .nextTimePreservingSmallerComponents)!
+    return startOfDay(dt)
 }
 
 /// next week's weekday (at least 7 days ahead)
@@ -226,9 +251,9 @@ fileprivate func nextWeekday(_ weekday: Int, from date: Date) -> Date {
     let upcoming = cal.nextDate(after: date, matching: comps, matchingPolicy: .nextTimePreservingSmallerComponents)!
     let plus7 = cal.date(byAdding: .day, value: 7, to: date)!
     if upcoming <= plus7 {
-        return cal.date(byAdding: .day, value: 7, to: upcoming)!
+        return startOfDay(cal.date(byAdding: .day, value: 7, to: upcoming)!)
     }
-    return upcoming
+    return startOfDay(upcoming)
 }
 
 // MARK: - Regex helper
@@ -236,4 +261,8 @@ fileprivate func matches(for regex: String, in text: String) -> [String] {
     (try? NSRegularExpression(pattern: regex))?
         .matches(in: text, range: NSRange(text.startIndex..., in: text))
         .compactMap { Range($0.range, in: text).map { String(text[$0]) } } ?? []
+}
+
+fileprivate func startOfDay(_ date: Date) -> Date {
+    Calendar.current.startOfDay(for: date)
 }

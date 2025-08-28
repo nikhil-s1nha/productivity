@@ -141,10 +141,16 @@ private struct SectionGroupView: View {
                             }
                             HStack(spacing: 8) {
                                 if let due = item.dueDate {
+                                    let comps = Calendar.current.dateComponents([.hour, .minute, .second], from: due)
+                                    let isMidnight = (comps.hour == 0 && comps.minute == 0 && comps.second == 0)
                                     Label {
-                                        Text(due, format: .dateTime.month().day().hour().minute())
+                                        Text(isMidnight
+                                             ? due.formatted(.dateTime.month().day())
+                                             : due.formatted(.dateTime.month().day().hour().minute()))
                                             .font(.caption)
-                                    } icon: { Image(systemName: "calendar") }
+                                    } icon: {
+                                        Image(systemName: "calendar")
+                                    }
                                     .labelStyle(.titleAndIcon)
                                 }
                                 if let d = item.durationMinutes {
