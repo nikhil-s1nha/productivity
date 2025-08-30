@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 private struct TaskSection: Identifiable {
     let id: String
@@ -10,6 +11,7 @@ struct ListsView: View {
     @State private var showingNew = false
     @State private var showingSettings = false
     @State private var collapsedSections: Set<String> = []
+    @State private var draggingTask: TaskItem? = nil
 
     private enum DashboardSection { case today, upcoming, all, completed }
     @State private var selectedSection: DashboardSection? = nil
@@ -114,6 +116,11 @@ struct ListsView: View {
                                     .contentShape(Rectangle())
                                 }
                             }
+                            .contentShape(Rectangle())
+                            .onDrag {
+                                draggingTask = item
+                                return NSItemProvider(object: NSString(string: item.title))
+                            }
                             .swipeActions(edge: .leading, allowsFullSwipe: true) {
                                 Button {
                                     withAnimation { store.toggle(item.id) }
@@ -140,6 +147,14 @@ struct ListsView: View {
                         if isCollapsed { collapsedSections.remove(sec.id) } else { collapsedSections.insert(sec.id) }
                     }
                 }
+                .onDrop(of: [UTType.plainText], isTargeted: nil) { _ in
+                    if let moving = draggingTask {
+                        move(moving, toSection: sec.id)
+                        draggingTask = nil
+                        return true
+                    }
+                    return false
+                }
             }
         }
         .navigationTitle(title(for: section))
@@ -153,9 +168,25 @@ struct ListsView: View {
         }
         .sheet(isPresented: $showingNew) { NewTaskSheet { store.add($0) } }
     }
+    private func move(_ task: TaskItem, toSection sectionId: String) {
+        guard let idx = store.tasks.firstIndex(where: { $0.id == task.id }) else { return }
+        var updated = store.tasks[idx]
+        var tags = updated.tags
+        // Remove current category (first tag) if present
+        if !tags.isEmpty { tags.removeFirst() }
+        // Set new category tag unless "Other"
+        if sectionId != "Other" { tags.insert(sectionId, at: 0) }
+        updated.tags = tags
+        store.update(updated)
+    }
+
 
     private func title(for section: DashboardSection) -> String {
         switch section { case .today: return "Today"; case .upcoming: return "Upcoming"; case .all: return "All"; case .completed: return "Completed" }
+    }
+
+    private func isMeeting(_ item: TaskItem) -> Bool {
+        item.tags.contains("meeting") || item.tags.contains(where: { $0.hasPrefix("meeting:") })
     }
 
     private func filteredItems(for section: DashboardSection) -> [TaskItem] {
@@ -164,17 +195,25 @@ struct ListsView: View {
         switch section {
         case .today:
             return store.tasks.filter { ($0.scheduledStart ?? $0.dueDate).map(cal.isDateInToday) ?? false }
+                .filter { !isMeeting($0) }
         case .upcoming:
             let end = cal.date(byAdding: .day, value: 3, to: now)!
             return store.tasks.filter {
                 guard let d = ($0.scheduledStart ?? $0.dueDate) else { return false }
                 return d > now && d < end && !$0.isCompleted
             }
+            .filter { !isMeeting($0) }
         case .all:
-            return store.tasks
+            return store.tasks.filter { !isMeeting($0) }
         case .completed:
             let start = cal.date(byAdding: .day, value: -7, to: now)!
-            return store.tasks.filter { $0.isCompleted && (($0.scheduledStart ?? $0.dueDate) ?? .distantPast) > start }
+            return store.tasks
+                .filter { task in
+                    guard task.isCompleted else { return false }
+                    let ref = task.scheduledStart ?? task.dueDate ?? task.createdAt
+                    return ref > start
+                }
+                .filter { !isMeeting($0) }
         }
     }
 
@@ -354,17 +393,25 @@ private struct KeywordSettingsSheet: View {
     @State private var key: String = ""
     @State private var category: String = ""
 
+    // Helper to save the mapping if both fields are non-empty
+    private func saveMappingIfValid() {
+        let k = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        let c = category.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !k.isEmpty, !c.isEmpty else { return }
+        store.setMapping(key: k, category: c)
+        key = ""; category = ""
+    }
+
     var body: some View {
         NavigationStack {
             Form {
                 Section("Add Mapping") {
                     TextField("Keyword (e.g., noori)", text: $key)
+                        .submitLabel(.done)
                     TextField("Category (e.g., AP GOV)", text: $category)
+                        .submitLabel(.done)
                     Button("Add / Update") {
-                        guard !key.trimmingCharacters(in: .whitespaces).isEmpty,
-                              !category.trimmingCharacters(in: .whitespaces).isEmpty else { return }
-                        store.setMapping(key: key, category: category)
-                        key = ""; category = ""
+                        saveMappingIfValid()
                     }
                 }
                 Section("Current Mappings") {
@@ -382,8 +429,10 @@ private struct KeywordSettingsSheet: View {
                     }
                 }
             }
+            .onSubmit { saveMappingIfValid() }
             .navigationTitle("Keyword Settings")
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } } }
         }
+        .onDisappear { saveMappingIfValid() }
     }
 }

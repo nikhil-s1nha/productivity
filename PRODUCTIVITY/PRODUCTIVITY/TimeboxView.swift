@@ -1,5 +1,17 @@
 import SwiftUI
 
+// MARK: - Repeating Tasks Model
+private struct RepeatDef: Identifiable, Codable, Equatable {
+    var id: UUID = UUID()
+    var title: String
+    var hour: Int
+    var minute: Int
+    var endHour: Int? = nil
+    var endMinute: Int? = nil
+    /// 1 = Sunday ... 7 = Saturday (Calendar.weekday)
+    var weekdays: [Int]
+}
+
 struct TimeboxView: View {
     @EnvironmentObject private var store: TaskStore
     @State private var selectedDate: Date = .now
@@ -10,6 +22,7 @@ struct TimeboxView: View {
     @AppStorage("wakeMinute") private var wakeMinute: Int = 0
     @AppStorage("sleepHour") private var sleepHour: Int = 23
     @AppStorage("sleepMinute") private var sleepMinute: Int = 30
+    @AppStorage("repeatingTasksJSON") private var repeatingTasksJSON: String = "[]"
     @State private var showSettings = false
     @State private var completedAnchors: Set<String> = []
     private func anchorKey(_ title: String, date: Date) -> String {
@@ -86,7 +99,8 @@ struct TimeboxView: View {
             }
             .sheet(isPresented: $showSettings) {
                 TimeboxSettingsSheet(wakeHour: $wakeHour, wakeMinute: $wakeMinute,
-                                     sleepHour: $sleepHour, sleepMinute: $sleepMinute)
+                                     sleepHour: $sleepHour, sleepMinute: $sleepMinute,
+                                     repeatsJSON: $repeatingTasksJSON)
             }
             .overlay(alignment: .bottomTrailing) {
                 Button { showUnplannedSheet = true } label: {
@@ -139,8 +153,39 @@ struct TimeboxView: View {
                              durationMinutes: 0, isCompleted: sleepCompleted, tags: [])
         return [wake, sleep]
     }
+
+    private func loadRepeats() -> [RepeatDef] {
+        (try? JSONDecoder().decode([RepeatDef].self, from: Data(repeatingTasksJSON.utf8))) ?? []
+    }
+    private func saveRepeats(_ defs: [RepeatDef]) {
+        if let data = try? JSONEncoder().encode(defs) {
+            repeatingTasksJSON = String(decoding: data, as: UTF8.self)
+        }
+    }
+
+    private var repeatingTasks: [TaskItem] {
+        let defs = loadRepeats()
+        let cal = Calendar.current
+        let wd = cal.component(.weekday, from: selectedDate) // 1..7
+        func at(_ hour: Int, _ minute: Int) -> Date {
+            cal.date(bySettingHour: hour, minute: minute, second: 0, of: selectedDate) ?? selectedDate
+        }
+        return defs.compactMap { def in
+            guard def.weekdays.contains(wd) else { return nil }
+            let startDate = at(def.hour, def.minute)
+            var dur = 0
+            if let eh = def.endHour, let em = def.endMinute {
+                let endDate = at(eh, em)
+                dur = max(0, Int(endDate.timeIntervalSince(startDate) / 60))
+            }
+            return TaskItem(id: UUID(), title: def.title, note: "", createdAt: .now,
+                            dueDate: nil, scheduledStart: startDate,
+                            durationMinutes: dur, isCompleted: false, tags: [])
+        }
+    }
+
     private var fullDayPlan: [TaskItem] {
-        (dayPlan + anchorTasks).sorted { ($0.scheduledStart ?? .distantPast) < ($1.scheduledStart ?? .distantPast) }
+        (dayPlan + anchorTasks + repeatingTasks).sorted { ($0.scheduledStart ?? .distantPast) < ($1.scheduledStart ?? .distantPast) }
     }
 
     private func approachingMinutes(for item: TaskItem) -> Int? {
@@ -157,28 +202,40 @@ private struct WeekStrip: View {
 
     var body: some View {
         let cal = Calendar.current
-        let start = cal.startOfWeek(for: selected)
-        let days = (0..<7).compactMap { cal.date(byAdding: .day, value: $0, to: start) }
-
-        HStack(spacing: 16) {
-            ForEach(days, id: \.self) { day in
-                VStack(spacing: 6) {
-                    Text(day.formatted(.dateTime.weekday(.abbreviated)))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    ZStack {
-                        Circle()
-                            .fill(cal.isDate(day, inSameDayAs: selected) ? Color.accentColor : Color.clear)
-                            .frame(width: 30, height: 30)
-                        Text(day.formatted(.dateTime.day()))
-                            .font(.callout.weight(.semibold))
-                            .foregroundStyle(cal.isDate(day, inSameDayAs: selected) ? .white : .primary)
+        let weekStart = cal.startOfWeek(for: selected)
+        let days = (0..<7).compactMap { cal.date(byAdding: .day, value: $0, to: weekStart) }
+        HStack(spacing: 12) {
+            Button(action: {
+                if let prev = cal.date(byAdding: .day, value: -7, to: selected) { selected = prev }
+            }) {
+                Image(systemName: "chevron.left")
+            }
+            Spacer(minLength: 0)
+            HStack(spacing: 16) {
+                ForEach(days, id: \.self) { day in
+                    VStack(spacing: 6) {
+                        Text(day.formatted(.dateTime.weekday(.narrow)))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        ZStack {
+                            Circle()
+                                .fill(cal.isDate(day, inSameDayAs: selected) ? Color.accentColor : Color.clear)
+                                .frame(width: 30, height: 30)
+                            Text(day.formatted(.dateTime.day()))
+                                .font(.callout.weight(.semibold))
+                                .foregroundStyle(cal.isDate(day, inSameDayAs: selected) ? .white : .primary)
+                        }
                     }
+                    .onTapGesture { selected = day }
                 }
-                .onTapGesture { selected = day }
+            }
+            Spacer(minLength: 0)
+            Button(action: {
+                if let next = cal.date(byAdding: .day, value: 7, to: selected) { selected = next }
+            }) {
+                Image(systemName: "chevron.right")
             }
         }
-        .frame(maxWidth: .infinity, alignment: .center)
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
         .background(Color(.secondarySystemBackground))
@@ -621,6 +678,7 @@ private struct TimeboxSettingsSheet: View {
     @Binding var wakeMinute: Int
     @Binding var sleepHour: Int
     @Binding var sleepMinute: Int
+    @Binding var repeatsJSON: String
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -628,6 +686,11 @@ private struct TimeboxSettingsSheet: View {
             Form {
                 Section("Wake Up") { TimePickerView(hour: $wakeHour, minute: $wakeMinute) }
                 Section("Sleep") { TimePickerView(hour: $sleepHour, minute: $sleepMinute) }
+                Section("Repeating Tasks") {
+                    NavigationLink("Manage Repeats") {
+                        RepeatingTasksSheet(json: $repeatsJSON)
+                    }
+                }
             }
             .navigationTitle("Defaults")
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
@@ -758,6 +821,115 @@ private struct IconPickerSheet: View {
             }
             .navigationTitle("Choose Icon")
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+        }
+    }
+}
+
+// MARK: - Repeating Tasks Manager
+private struct RepeatingTasksSheet: View {
+    @Binding var json: String
+    @Environment(\.dismiss) private var dismiss
+    @State private var defs: [RepeatDef] = []
+    @State private var editing: RepeatDef? = nil
+    private let weekdayNames = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"]
+
+    var body: some View {
+        List {
+            ForEach(defs) { def in
+                Button { editing = def } label: {
+                    HStack {
+                        VStack(alignment: .leading) {
+                            Text(def.title).font(.headline)
+                            Text("\(String(format: "%02d:%02d", def.hour, def.minute)) • \(def.weekdays.sorted().map { weekdayNames[$0-1] }.joined(separator: ", "))")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right").foregroundStyle(.secondary)
+                    }
+                }
+            }.onDelete { idx in defs.remove(atOffsets: idx) }
+        }
+        .navigationTitle("Repeating Tasks")
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) { Button("Done") { save(); dismiss() } }
+            ToolbarItem(placement: .confirmationAction) {
+                Button { editing = RepeatDef(title: "", hour: 8, minute: 0, endHour: 9, endMinute: 0, weekdays: [2,3,4,5,6]) } label: {
+                    Image(systemName: "plus")
+                }
+            }
+        }
+        .sheet(item: $editing) { def in
+            RepeatEditor(def: def) { updated in
+                if let i = defs.firstIndex(where: { $0.id == updated.id }) { defs[i] = updated } else { defs.append(updated) }
+            }
+        }
+        .onAppear {
+            defs = (try? JSONDecoder().decode([RepeatDef].self, from: Data(json.utf8))) ?? []
+        }
+    }
+
+    private func save() {
+        if let data = try? JSONEncoder().encode(defs) {
+            json = String(decoding: data, as: UTF8.self)
+        }
+    }
+}
+
+private struct RepeatEditor: View {
+    @Environment(\.dismiss) private var dismiss
+    @State var def: RepeatDef
+    var onSave: (RepeatDef) -> Void
+    private let weekdayNames = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"]
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                TextField("Task", text: $def.title)
+                HStack {
+                    DatePicker("From", selection: Binding(
+                        get: { Calendar.current.date(bySettingHour: def.hour, minute: def.minute, second: 0, of: .now) ?? .now },
+                        set: { d in
+                            let c = Calendar.current.dateComponents([.hour,.minute], from: d)
+                            def.hour = c.hour ?? def.hour
+                            def.minute = c.minute ?? def.minute
+                        }
+                    ), displayedComponents: .hourAndMinute)
+                    DatePicker("To", selection: Binding(
+                        get: {
+                            let eh = def.endHour ?? def.hour
+                            let em = def.endMinute ?? ((def.minute + 30) % 60)
+                            return Calendar.current.date(bySettingHour: eh, minute: em, second: 0, of: .now) ?? .now
+                        },
+                        set: { d in
+                            let c = Calendar.current.dateComponents([.hour,.minute], from: d)
+                            def.endHour = c.hour
+                            def.endMinute = c.minute
+                        }
+                    ), displayedComponents: .hourAndMinute)
+                }
+                HStack(spacing: 6) {
+                    let letters = Array("SMTWTFS")
+                    ForEach(1...7, id: \.self) { w in
+                        let sel = def.weekdays.contains(w)
+                        Button {
+                            if sel { def.weekdays.removeAll { $0 == w } } else { def.weekdays.append(w) }
+                        } label: {
+                            Text(String(letters[w-1]))
+                                .font(.caption).monospaced()
+                                .foregroundStyle(sel ? .white : .primary)
+                                .frame(width: 28, height: 28)
+                                .background(Circle().fill(sel ? Color.accentColor : Color.secondary.opacity(0.15)))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+            .navigationTitle("Edit Repeat")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) { Button("Save") { onSave(def); dismiss() } }
+            }
         }
     }
 }

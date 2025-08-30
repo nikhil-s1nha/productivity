@@ -85,18 +85,22 @@ final class TaskStore: ObservableObject {
                 title = title.replacingOccurrences(of: durToken, with: "").trimmingCharacters(in: .whitespaces)
             }
 
-            // relative day tokens → due date (minimal: tomorrow / yesterday)
+            // relative day tokens → due date (minimal: tomorrow / yesterday / today)
             do {
                 let lower = title.lowercased()
                 if lower.contains("tomorrow") || lower.contains("tmr") || lower.contains("tmrw") {
                     if let date = Calendar.current.date(byAdding: .day, value: 1, to: .now) {
                         due = startOfDay(date)
                     }
-                    // strip token(s) from title
                     ["tomorrow","tmr","tmrw"].forEach { tok in
                         title = title.replacingOccurrences(of: tok, with: "", options: .caseInsensitive)
                     }
                     title = title.replacingOccurrences(of: "  ", with: " ").trimmingCharacters(in: .whitespaces)
+                } else if lower.contains("today") {
+                    due = startOfDay(.now)
+                    title = title.replacingOccurrences(of: "today", with: "", options: .caseInsensitive)
+                        .replacingOccurrences(of: "  ", with: " ")
+                        .trimmingCharacters(in: .whitespaces)
                 } else if lower.contains("yesterday") {
                     if let date = Calendar.current.date(byAdding: .day, value: -1, to: .now) {
                         due = startOfDay(date)
@@ -119,6 +123,132 @@ final class TaskStore: ObservableObject {
                 title = title.replacingOccurrences(of: name, with: "", options: .caseInsensitive)
                     .trimmingCharacters(in: .whitespaces)
             }
+            
+            // meetings: classify and optionally schedule into timebox
+            var isMeeting = false
+            var meetingType: String?
+            do {
+                let lower = title.lowercased()
+                // detect "meeting" or "mtg"
+                if lower.contains(" meeting") || lower.contains(" mtg") || lower.hasSuffix("meeting") || lower.hasSuffix("mtg") {
+                    isMeeting = true
+                    // capture word before meeting: e.g., "rocketry meeting"
+                    let typePattern = #"(?i)\b([A-Za-z0-9\-]+)\s+(meeting|mtg)\b"#
+                    if let m = try? NSRegularExpression(pattern: typePattern)
+                        .firstMatch(in: title, range: NSRange(title.startIndex..<title.endIndex, in: title)),
+                       let r1 = m.range(at: 1).location != NSNotFound ? Range(m.range(at: 1), in: title) : nil {
+                        meetingType = String(title[r1]).lowercased()
+                    }
+                    // strip the literal word "meeting"/"mtg" from the title
+                    title = title.replacingOccurrences(of: #"(?i)\b(meeting|mtg)\b"#, with: "", options: .regularExpression)
+                        .replacingOccurrences(of: "  ", with: " ").trimmingCharacters(in: .whitespaces)
+                }
+            }
+            // If it's a meeting, try to parse a time range "10 - 12", "10pm-12pm", etc.
+            if isMeeting {
+                let baseDay: Date = (due != nil) ? startOfDay(due!) : startOfDay(.now)
+                let rangePattern = #"(?i)\b(\d{1,2})(?::(\d{2}))?\s*(am|pm|a|p)?\s*-\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm|a|p)?\b"#
+                if let rangeRegex = try? NSRegularExpression(pattern: rangePattern) {
+                    let r = NSRange(title.startIndex..<title.endIndex, in: title)
+                    if let m = rangeRegex.firstMatch(in: title, range: r) {
+                        func to24h(_ hStr: String, _ mStr: String?, _ md: String?) -> (Int, Int) {
+                            var h = Int(hStr) ?? 0
+                            let mm = Int(mStr ?? "0") ?? 0
+                            var isPM = false
+                            var isAM = false
+                            if let md = md?.lowercased() {
+                                if md == "pm" || md == "p" { isPM = true }
+                                if md == "am" || md == "a" { isAM = true }
+                            } else {
+                                // default PM when unspecified
+                                isPM = true
+                            }
+                            if isAM {
+                                if h == 12 { h = 0 }
+                            } else if isPM {
+                                if h != 12 { h += 12 }
+                            }
+                            return (h, mm)
+                        }
+                        // groups: 1 hour, 2 minute, 3 md ; 4 hour, 5 minute, 6 md
+                        let h1 = Range(m.range(at: 1), in: title).map { String(title[$0]) } ?? "0"
+                        let m1 = Range(m.range(at: 2), in: title).map { String(title[$0]) }
+                        let md1 = Range(m.range(at: 3), in: title).map { String(title[$0]) }
+                        let h2 = Range(m.range(at: 4), in: title).map { String(title[$0]) } ?? "0"
+                        let m2 = Range(m.range(at: 5), in: title).map { String(title[$0]) }
+                        let md2 = Range(m.range(at: 6), in: title).map { String(title[$0]) }
+                        let (sh, sm) = to24h(h1, m1, md1)
+                        let (eh, em) = to24h(h2, m2, md2)
+                        if let startDate = Calendar.current.date(bySettingHour: sh, minute: sm, second: 0, of: baseDay),
+                           let endDate = Calendar.current.date(bySettingHour: eh, minute: em, second: 0, of: baseDay) {
+                            // assign scheduled start/duration for timebox
+                            duration = max(0, Int(endDate.timeIntervalSince(startDate) / 60))
+                            due = startDate
+                        }
+                        // strip the matched range token
+                        if let rr = Range(m.range(at: 0), in: title) {
+                            title.removeSubrange(rr)
+                            title = title.replacingOccurrences(of: "  ", with: " ").trimmingCharacters(in: .whitespaces)
+                        }
+                    }
+                }
+                // add meeting tags
+                if !tags.contains("meeting") { tags.append("meeting") }
+                if let t = meetingType, !t.isEmpty { tags.append("meeting:\(t)") }
+            }
+
+            // time tokens → set time on due date (assume PM if no am/pm)
+            do {
+                let pattern = #"(?i)\b(\d{1,2})(?::(\d{2}))?\s*(am|pm|a|p)?\b"#
+                guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+                let range = NSRange(title.startIndex..<title.endIndex, in: title)
+                if let match = regex.firstMatch(in: title, range: range),
+                   match.numberOfRanges >= 2,
+                   let hourRange = Range(match.range(at: 1), in: title) {
+                    let hourStr = String(title[hourRange])
+                    let minuteStr: String = {
+                        if let mr = Range(match.range(at: 2), in: title) {
+                            return String(title[mr])
+                        } else { return "0" }
+                    }()
+                    let meridiem: String? = {
+                        if let mr = Range(match.range(at: 3), in: title) {
+                            return String(title[mr]).lowercased()
+                        } else { return nil }
+                    }()
+                    if var hour = Int(hourStr), let minute = Int(minuteStr) {
+                        var isPM = false
+                        var isAM = false
+                        if let m = meridiem {
+                            if m == "pm" || m == "p" { isPM = true }
+                            if m == "am" || m == "a" { isAM = true }
+                        } else {
+                            // default to PM when not specified
+                            isPM = true
+                        }
+                        // normalize 12 AM/PM
+                        if isAM {
+                            if hour == 12 { hour = 0 }
+                        } else if isPM {
+                            if hour != 12 { hour += 12 }
+                        }
+                        // decide base date
+                        let base: Date = due ?? .now
+                        if let set = Calendar.current.date(bySettingHour: hour, minute: minute, second: 0, of: base) {
+                            due = set
+                        }
+                        // strip the time token from title
+                        let tokenRange = Range(match.range(at: 0), in: title)!
+                        title.removeSubrange(tokenRange)
+                        title = title.replacingOccurrences(of: "  ", with: " ").trimmingCharacters(in: .whitespaces)
+                        if isMeeting {
+                            // if we parsed a single time, use it as scheduled start; set default 60m if no duration yet
+                            // (Timebox uses scheduledStart; we store time in 'due' then copy in build step below)
+                            if duration == nil { duration = 60 }
+                        }
+                    }
+                }
+            }
 
             // keywordMap: token -> category tag (remove token from title)
             var words: [String] = []
@@ -133,13 +263,19 @@ final class TaskStore: ObservableObject {
             title = words.joined(separator: " ")
 
             // build and save
+            // If this was a meeting and we have a time component, schedule it; else leave scheduledStart nil.
+            let hasTime: Bool = {
+                guard let d = due else { return false }
+                let c = Calendar.current.dateComponents([.hour,.minute,.second], from: d)
+                return (c.hour ?? 0) != 0 || (c.minute ?? 0) != 0 || (c.second ?? 0) != 0
+            }()
             let item = TaskItem(
                 id: UUID(),
                 title: title,
                 note: "",
                 createdAt: .now,
-                dueDate: due,
-                scheduledStart: nil,
+                dueDate: hasTime ? nil : due,          // if timebox scheduled, keep dueDate nil (timebox shows it)
+                scheduledStart: hasTime ? due : nil,   // timebox start when time was provided
                 durationMinutes: duration,
                 isCompleted: false,
                 tags: tags
@@ -266,3 +402,4 @@ fileprivate func matches(for regex: String, in text: String) -> [String] {
 fileprivate func startOfDay(_ date: Date) -> Date {
     Calendar.current.startOfDay(for: date)
 }
+ 
